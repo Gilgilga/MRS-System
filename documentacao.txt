@@ -1,0 +1,287 @@
+# Documentação Técnica: Sistema de Lixeira Inteligente (MRS System)
+
+Este documento descreve detalhadamente o funcionamento, a reprodução, as especificações de hardware, o software e os protocolos de comunicação do projeto **Lixeira Inteligente (MRS System)**.
+
+---
+
+## I. Funcionamento e Uso (Guia de Reprodução)
+
+O projeto consiste em um sistema de monitoramento de resíduos baseado em Internet das Coisas (IoT) de ponta a ponta.
+
+### 1. Como Funciona o Sistema
+
+1. **Sensoriamento**: O sensor ultrassônico **HC-SR04**, acoplado na parte interna superior da tampa da lixeira, mede constantemente a distância entre a tampa e o acúmulo de resíduos no fundo.
+2. **Processamento**: O microcontrolador **ESP32 DevKit V1** recebe os tempos de retorno das ondas ultrassônicas, converte em distância (centímetros) e calcula a porcentagem de preenchimento (onde a distância mínima equivale a $100\%$ cheia e a máxima a $0\%$ cheia).
+3. **Sinalização Local**: Um **LED de Sinalização** conectado ao ESP32 pisca em diferentes frequências para indicar se o dispositivo está conectando à rede, se está funcionando normalmente (nível operacional) ou se a lixeira atingiu capacidade crítica ($\ge 80\%$).
+4. **Comunicação por Internet**: O ESP32 envia esses dados de nível em formato de mensagem estruturada para um servidor intermediário na internet (**Broker MQTT HiveMQ** público), utilizando a pilha de rede Wi-Fi e os protocolos **TCP/IP** e **MQTT**.
+5. **Dashboard Web (Interface do Usuário)**: Uma aplicação web Next.js responsiva (PWA - Progressive Web App) conecta-se ao mesmo broker via WebSockets Seguros (WSS), atualizando um painel dinâmico em tempo real à medida que as mensagens chegam, calculando a taxa de preenchimento por hora e a estimativa de tempo restante até a lotação.
+
+```text
+ +----------------------------------------------------------------------------------------------------+
+ |                                          Fluxo de Dados                                            |
+ +-----------------------------------+                                                                |
+ | 1. Sensor HC-SR04 (Ultrassom)     |                                                                |
+ |    Detecta distância do lixo      |                                                                |
+ +-----------------+-----------------+                                                                |
+                   | (Eco em microssegundos)                                                           |
+                   v                                                                                  |
+ +-----------------+-----------------+                                                                |
+ | 2. ESP32 DevKit V1 (Processa)     | <----\                                                         |
+ |    Calcula % de preenchimento     |      | (Controle do LED de status)                             |
+ +-----------------+-----------------+ -----/                                                         |
+                   | (Via Wi-Fi Local - Protocolo TCP/IP)                                             |
+                   v                                                                                  |
+ +-----------------+-----------------+                                                                |
+ | 3. Broker MQTT (HiveMQ na Nuvem)  |                                                                |
+ |    Roteador / Servidor Pub/Sub    |                                                                |
+ +-----------------+-----------------+                                                                |
+                   | (Via WebSockets Seguros - WSS)                                                   |
+                   v                                                                                  |
+ +-----------------+-----------------+                                                                |
+ | 4. Dashboard Web (Next.js PWA)    |                                                                |
+ |    Exibe alertas e telemetria     |                                                                |
+ +-----------------------------------+                                                                |
+ +----------------------------------------------------------------------------------------------------+
+```
+
+### 2. Guia de Reprodução Passo a Passo
+
+Para reproduzir este projeto, siga as etapas abaixo:
+
+#### A. Montagem do Hardware
+
+1. Conecte o sensor HC-SR04 e o LED ao ESP32 seguindo o esquema básico de fiação:
+   * **HC-SR04 VCC** $\rightarrow$ **ESP32 VIN** (5V)
+   * **HC-SR04 GND** $\rightarrow$ **ESP32 GND**
+   * **HC-SR04 Trigger** $\rightarrow$ **ESP32 GPIO 12**
+   * **HC-SR04 Echo** $\rightarrow$ **ESP32 GPIO 14**
+   * **LED de Sinalização Anodo (Perna longa)** $\rightarrow$ Resistor de $220\ \Omega$ $\rightarrow$ **ESP32 GPIO 4**
+   * **LED de Sinalização Catodo (Perna curta)** $\rightarrow$ **ESP32 GND**
+   * *Nota*: Para testes simplificados de laboratório, o próprio LED onboard do ESP32 (**GPIO 2**) pode ser configurado no código.
+
+#### B. Gravação do Firmware no ESP32
+
+1. Instale a **Arduino IDE** em seu computador.
+2. Nas preferências da IDE, adicione a URL de placas adicionais para o ESP32: `https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json`.
+3. Pelo Gerenciador de Placas, instale o pacote de placas **esp32** (da Espressif Systems).
+4. No Gerenciador de Bibliotecas, instale a biblioteca **PubSubClient** (por Nick O'Leary) para suporte ao protocolo MQTT.
+5. Crie um esboço contendo a lógica de:
+   * Conexão ao Wi-Fi local utilizando a biblioteca nativa `WiFi.h`.
+   * Conexão ao broker MQTT público no host `broker.hivemq.com` na porta `1883` com ID único.
+   * Disparo e leitura do pulso de trigger do HC-SR04 (pulso alto de $10\ \mu\text{s}$) e leitura do tempo de eco.
+   * Cálculo da distância em centímetros: $\text{Distância} = (\text{Tempo de Eco} \times 0,0343) / 2$.
+   * Conversão da distância para nível percentual:
+     $$
+     \text{Nível (\%)} = \frac{\text{Altura Vazia} - \text{Distância}}{\text{Altura Vazia} - \text{Altura Cheia}} \times 100
+     $$
+
+     *(Exemplo: Altura interna da lixeira = 50 cm. Altura cheia = 5 cm. Altura vazia = 45 cm).*
+   * Formatação do payload em JSON (ex: `{"id": "Lixeira-01", "nivel": 75.0}`) ou envio de string numérica crua (`75.0`).
+   * Publicação do payload no tópico MQTT `mackenzie/mrs/nivel/Lixeira-01`.
+   * Lógica do LED: piscar lento se estiver desconectado do Wi-Fi/MQTT; aceso constante se estiver online e em nível seguro; piscar rápido se o nível for $\ge 80\%$.
+
+#### C. Execução do Dashboard Web
+
+1. Certifique-se de ter o **Node.js** (versão 18 ou superior) instalado.
+2. Na raiz da pasta da aplicação, instale as dependências:
+   ```bash
+   npm install
+   ```
+3. Inicie o servidor de desenvolvimento:
+   ```bash
+   npm run dev
+   ```
+4. Acesse a aplicação no navegador em [http://localhost:3000](http://localhost:3000). O dashboard se conectará automaticamente ao broker HiveMQ via WebSocket e começará a escutar os tópicos das lixeiras.
+
+---
+
+## II. Software Desenvolvido e Documentação de Código
+
+O ecossistema de software do projeto divide-se em duas partes principais desenvolvidas:
+
+### 1. Dashboard Web Frontend (PWA Next.js)
+
+Construído com Next.js, TypeScript e gerenciamento de estado Zustand.
+
+* **`src/services/mqttService.ts`**:
+
+  * **Função**: Singleton responsável pela comunicação em tempo real via internet através do protocolo MQTT encapsulado em WebSockets seguros.
+  * **Conexão**: Conecta-se à URL `wss://broker.hivemq.com:8884/mqtt` de modo assíncrono e persistente.
+  * **Inscrição**: Assina os tópicos `mackenzie/mrs/nivel` (mensagens JSON globais) e `mackenzie/mrs/nivel/#` (leituras brutas ou JSON de IDs específicos).
+  * **Processamento**:
+    * *Mensagem JSON*: Tenta parsear objetos como `{"id": "Lixeira-01", "nivel": 82}`. Se for válido, aciona a atualização de estado.
+    * *Mensagem Bruta (Float/Int)*: Caso receba um número plano (ex. `82.5`), extrai o ID a partir do sub-tópico de recebimento (ex. `mackenzie/mrs/nivel/Lixeira-02` extrai `Lixeira-02`) e atualiza o nível da lixeira correspondente.
+  * **Comportamento Resiliente**: Possui tratamento nativo de reconexão cíclica (a cada 5 segundos), tratamentos de erros de rede e sinaliza se o sistema está online/offline atualizando a store de estado global.
+* **`src/store/useBinStore.ts`**:
+
+  * **Função**: Gerenciamento de estado reativo das lixeiras.
+  * **Lógica de Análise de Enchimento**:
+    * Armazena um histórico das últimas 6 leituras por lixeira.
+    * Calcula a taxa de variação de nível por hora ($\Delta \% / \text{hora}$).
+    * Estima o tempo restante em horas até o preenchimento total ($100\%$) com base no histórico recente.
+  * **Detecção de Queda de Conexão (Timeouts)**:
+    * Se uma lixeira não enviar atualizações em até 25 segundos, ela é marcada visualmente como **offline** e sua previsão é pausada.
+    * Se o tempo sem atualizações exceder 60 segundos, a lixeira é removida temporariamente do painel ativo até que envie uma nova mensagem.
+  * **Simulador Interno**: Possui tarefas periódicas que geram leituras artificiais de teste e as publicam no broker para fins de demonstração completa sem necessidade de hardware físico.
+
+### 2. Script de Monitoramento Python (`monitor_lixeira.py`)
+
+Um utilitário leve para monitoramento de eventos via linha de comando (CLI).
+
+* **Funcionamento**: Usa a biblioteca `paho-mqtt`. Conecta-se ao broker TCP na porta 1883. Ao receber uma atualização numérica de preenchimento no tópico `mackenzie/mrs/nivel`, ele interpreta o valor e classifica o status do sistema em tempo real:
+  * **OK**: Nível de preenchimento $< 70\%$ da capacidade.
+  * **Alerta**: Nível de preenchimento entre $70\%$ e $89.9\%$.
+  * **Crítico**: Nível de preenchimento $\ge 90\%$ (aciona aviso visual na tela indicando que a lixeira está pronta para coleta).
+
+---
+
+## III. Descrição do Hardware Utilizado
+
+A arquitetura de hardware foi projetada buscando baixo custo, alta eficiência de energia e facilidade de aquisição de componentes.
+
+```
+       +---------------------------------------------+
+       |               ESP32 DEVKIT V1               |
+       |                                             |
+       |  [VIN] (5V) --------- [VCC] (HC-SR04)       |
+       |  [GND] ------------- [GND] (HC-SR04)       |
+       |  [GPIO 12] ---------- [TRIG] (HC-SR04)       |
+       |  [GPIO 14] --------- [ECHO] (HC-SR04)       |
+       |                                             |
+       |  [GPIO 4] ---------- [Resistor 220 Ohm] ----+
+       |                                             |
+       |  [GND] ------------- [Catodo - LED] <-------+
+       +---------------------------------------------+
+```
+
+### 1. Plataforma de Desenvolvimento: ESP32 DevKit V1
+
+* **Descrição**: Módulo microcontrolador de baixo custo e alta performance dotado de conectividade sem fio.
+* **Componente de Processamento**: SoC ESP32 da Espressif Systems (Processador Tensilica Xtensa Dual-Core 32-bit LX6 rodando a 240 MHz).
+* **Módulos de Rádio Integrados**: Wi-Fi integrado 802.11 b/g/n (2.4 GHz) para conexão com a internet e Bluetooth v4.2 BR/EDR/BLE.
+* **Tensão de Alimentação**: 5V via conector micro-USB ou pino VIN; Tensão de operação interna dos pinos é de 3.3V.
+
+### 2. Sensor de Nível: Ultrassônico HC-SR04
+
+* **Descrição**: Sensor de distância ativo por ondas de ultrassom.
+* **Princípio de Operação**:
+  * O microcontrolador envia um pulso de disparo (Trigger) em nível alto por no mínimo $10\ \mu\text{s}$.
+  * O sensor emite um sinal sônico composto por 8 pulsos em 40 kHz.
+  * O sinal reflete no objeto (resíduos) e retorna ao receptor.
+  * O sensor sinaliza o tempo de propagação colocando o pino Echo em nível alto. O tempo que este pino permanece em nível alto é proporcional à distância medida.
+* **Tensão de Operação**: 5V DC (alimentado pelo pino VIN do ESP32).
+* **Faixa de Trabalho**: 2 cm a 400 cm.
+* **Ângulo de Sensor**: $< 15^\circ$.
+
+### 3. LED de Sinalização
+
+* **Descrição**: Diodo Emissor de Luz (LED) difuso (tipicamente vermelho ou amarelo) para feedback local do dispositivo.
+* **Circuito de Proteção**: Conectado em série com um resistor de $220\ \Omega$ (ou $330\ \Omega$) para limitar a corrente e evitar a queima do pino GPIO do ESP32 (corrente típica resultante: ~10 mA, o que é seguro para a porta do ESP32 limitada a 40 mA).
+* **Operação de Feedback**:
+  * *Piscando 1 vez por segundo*: Conectando à rede local Wi-Fi ou Broker MQTT.
+  * *Aceso fixo*: Dispositivo conectado à rede e nível de preenchimento seguro ($< 80\%$).
+  * *Piscando 5 vezes por segundo*: Alerta de lixeira cheia ($\ge 80\%$), sinalizando visualmente na lixeira a necessidade urgente de esvaziamento.
+
+### 4. Caixas, Medidas Físicas e Peças em Impressão 3D
+
+Para proteção e posicionamento adequado do hardware em ambiente real, são utilizadas peças mecânicas projetadas e fabricadas em impressora 3D (preferencialmente utilizando plásticos ABS, PETG ou ASA devido à resistência química e de umidade):
+
+* **Case Protetora do Microcontrolador**:
+  * **Dimensões externas sugeridas**: 85 mm (comprimento) x 65 mm (largura) x 45 mm (altura).
+  * **Características**: Caixa hermética para fixação do ESP32 DevKit V1 e da placa de conexões (protoboard ou placa de circuito impresso - PCB). Contém passador de cabos isolado com borracha (prensa-cabo) para alimentação externa e cabos do sensor.
+* **Suporte de Encaixe do Sensor Ultrassônico**:
+  * **Localização**: Fixado perpendicularmente na face interna da tampa da lixeira inteligente, direcionando o feixe ultrassônico para baixo.
+  * **Furação**: Dois recortes cilíndricos com diâmetro de 16,5 mm cada, com espaçamento de 26 mm de centro a centro, servindo de suporte firme e proteção física para as duas cápsulas cilíndricas do sensor HC-SR04.
+* **Medições de Referência da Lixeira de Testes (Exemplo Prático)**:
+  * **Lixeira Cilíndrica padrão de 40 Litros**:
+    * Altura total interna: 50 cm.
+    * Diâmetro interno útil: 30 cm.
+    * **Zonas de Calibração do Sensor**:
+      * **Distância Vazia ($0\%$ preenchida)**: 45 cm medida pelo sensor (define-se um recuo de 5 cm do sensor até o topo como "zona morta" do sensor para evitar contato direto com lixo e erros de leitura próximos ao limite de 2 cm do HC-SR04).
+      * **Distância Cheia ($100\%$ preenchida)**: 5 cm medida pelo sensor.
+
+---
+
+## IV. Interfaces, Protocolos e Módulos de Comunicação
+
+A comunicação de dados do ecossistema assenta-se em uma pilha padronizada de protocolos de internet (TCP/IP) e de IoT:
+
+```
++--------------------------------------------------------------------------------+
+|                               Pilha de Protocolos                              |
++--------------------------------------------------------------------------------+
+| Aplicação:          MQTT v3.1.1 (Telemetria Leve baseada em Pub/Sub)           |
++--------------------------------------------------------------------------------+
+| Transporte/Sessão:  TCP Convencional (Porta 1883)  |  WebSockets (Porta 8884)  |
++--------------------------------------------------------------------------------+
+| Rede:               Internet Protocol - IPv4 (Endereçamento na Internet)       |
++--------------------------------------------------------------------------------+
+| Enlace / Física:    Wi-Fi (802.11 b/g/n) para ESP32  |  Rede Local / Ethernet  |
++--------------------------------------------------------------------------------+
+```
+
+### 1. Pilha de Redes e Protocolos Utilizados
+
+* **Wi-Fi (IEEE 802.11 b/g/n)**: Utilizado como enlace físico e de controle de acesso para o módulo de rádio interno do ESP32.
+* **TCP/IP**: O protocolo IP (Internet Protocol) garante o roteamento dos pacotes pela internet global. O protocolo de transporte TCP (Transmission Control Protocol) estabelece conexões confiáveis e orientadas a fluxo, garantindo que as mensagens de medição de nível de preenchimento cheguem ao destino sem perdas ou duplicações.
+* **MQTT (Message Queuing Telemetry Transport)**: Protocolo leve de camada de aplicação voltado a sensores e telemetria. Opera sob o paradigma Publish/Subscribe (Publicação/Assinatura) mediado por um broker.
+  * O ESP32 usa a porta padrão TCP **1883** para o MQTT bruto.
+  * O Dashboard Web usa a porta **8884** para comunicação MQTT sobre **WebSockets Seguros (WSS)**, necessário para que o navegador se conecte e receba fluxos de dados sem violação de regras de segurança de origem (CORS) e HTTPS do navegador.
+
+### 2. Interfaces de Mensagem (Payloads e Tópicos)
+
+* **Tópico MQTT Base**: `mackenzie/mrs/nivel`
+* **Sub-tópico de Escuta Dinâmica**: `mackenzie/mrs/nivel/#` (permite assinar atualizações de qualquer ID de lixeira cadastrada).
+
+#### Interfaces de Dados Suportadas pela Aplicação
+
+##### Interface JSON Estruturada (Padrão Principal)
+
+Ideal para dispositivos inteligentes que possuem capacidade de serializar strings formatadas.
+
+* **Tópico de envio**: `mackenzie/mrs/nivel`
+* **Estrutura**:
+  ```json
+  {
+    "id": "Lixeira-01",
+    "nivel": 82.5,
+    "timestamp": "2026-05-29T10:45:00Z"
+  }
+  ```
+* **Campos**:
+  * `id`: String identificadora única do hardware instalado na lixeira (ex: `"Lixeira-ZonaSul-04"`).
+  * `nivel`: Float contendo a porcentagem da capacidade preenchida ($0$ a $100$).
+  * `timestamp`: String no formato de data ISO 8601 (opcional; caso omitido pelo hardware de baixo custo, o dashboard assume a hora de chegada no navegador).
+
+##### Interface por Tópico Individualizado (Leitura Bruta)
+
+Simplificado para dispositivos extremamente básicos com limitação de processamento.
+
+* **Tópico de envio**: `mackenzie/mrs/nivel/{ID_DA_LIXEIRA}` (Ex: `mackenzie/mrs/nivel/Lixeira-02`)
+* **Payload**: String contendo apenas o número do preenchimento em formato decimal simples:
+  ```text
+  82.5
+  ```
+* **Comportamento no Software**: O dashboard do sistema MRS intercepta a mensagem no broker HiveMQ, divide o caminho do tópico pelo caractere `/`, extrai o último termo (`Lixeira-02`) como sendo o ID do dispositivo e atribui a leitura correspondente de forma dinâmica no painel.
+
+---
+
+## V. Comunicação e Controle via Internet (TCP/IP e MQTT)
+
+O coração funcional do projeto reside na conectividade total via internet, possibilitada pelo protocolo **TCP/IP** e as características específicas do **MQTT**:
+
+### 1. Fluxo de Comunicação através da Internet
+
+O ESP32 não necessita de um IP público estático nem de regras de redirecionamento de portas (port forwarding) na rede local em que está conectado. O fluxo ocorre da seguinte forma:
+
+1. O ESP32 estabelece uma conexão Wi-Fi com o roteador local que possui acesso à internet.
+2. O ESP32 inicia uma conexão TCP ativa de saída direcionada ao IP do broker público **HiveMQ** (`broker.hivemq.com`) na porta **1883**. Por ser uma conexão de saída, ela passa facilmente pelas regras padrão do firewall doméstico ou comercial (NAT).
+3. O Dashboard Next.js, hospedado em qualquer servidor web ou rodando localmente no navegador de um administrador, inicia uma conexão segura TCP/WebSocket de saída na porta **8884** direcionada ao mesmo broker HiveMQ.
+4. O Broker HiveMQ serve como o nó de distribuição universal na nuvem. Quando o ESP32 publica a leitura, o broker instantaneamente redistribui o pacote de dados para todas as conexões de dashboards e scripts de monitoramento que estiverem assinando os tópicos iniciados em `mackenzie/mrs/nivel`.
+
+### 2. Por que o Protocolo MQTT sobre TCP/IP é Ideal para este Projeto?
+
+* **Baixíssimo Overhead de Dados**: Diferente do protocolo HTTP convencional, onde cada requisição necessita de cabeçalhos extensos (cerca de 1 KB de dados contendo User-Agent, Cookies, etc.), os cabeçalhos das mensagens de controle MQTT começam com apenas **2 Bytes**. Isso economiza considerável largura de banda, tornando o sistema compatível até mesmo com chips de telefonia móvel celular (modems 2G/3G/4G) acoplados ao ESP32.
+* **Desacoplamento Temporal e Espacial**: O produtor do dado (ESP32) e o consumidor (Dashboard) não se comunicam diretamente. Se o dashboard for fechado, o ESP32 continua transmitindo e os dados podem ser guardados ou descartados pelo broker. Se o ESP32 ficar sem bateria ou rede, o broker e o dashboard continuam operacionais, e a store do Zustand no frontend detectará a ausência do sinal após 25 segundos (timeout), marcando o sensor como "offline" de forma amigável.
+* **Qualidade de Serviço (QoS)**: O MQTT implementa QoS a nível de aplicação. No nosso caso, o QoS 0 (enviar no máximo uma vez, sem confirmação) é ideal pela simplicidade e frequência das leituras, reduzindo as operações de rede no microcontrolador.
+* **Eficiência Energética**: Como a conexão TCP é mantida aberta com um tempo de *Keep-Alive* (mensagens curtas de "ping" enviadas periodicamente), o ESP32 não precisa gastar energia realizando o aperto de mão inicial de três vias (*Three-Way Handshake*) do TCP para cada leitura nova enviada. Ele simplesmente dispara o pacote MQTT pelo canal que já está aberto, diminuindo o consumo elétrico e aumentando a vida útil da bateria do dispositivo de sensoriamento.
