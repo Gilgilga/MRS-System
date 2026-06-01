@@ -23,6 +23,7 @@ def ao_receber_mensagem(client, userdata, msg):
     print("-" * 30)
 
 # Inicialização do Cliente
+
 cliente = mqtt.Client()
 cliente.on_connect = ao_conectar
 cliente.on_message = ao_receber_mensagem
